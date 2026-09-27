@@ -22,7 +22,28 @@ Notifications/Audit Log UI → Advanced Alerts/Dashboard → **Reports & Analyti
 - أو: PostgreSQL 16 وRedis مثبَّتان محليًا إن كنتم لا تريدون Docker
 
 ---
+## 📸 لقطات من النظام
 
+### لوحة التحكم
+![Dashboard](docs/screenshots/01-dashboard.png)
+
+### إدارة المنتجات
+![Products](docs/screenshots/02-products.png)
+
+### أوامر البيع
+![Sales Orders](docs/screenshots/03-sales-orders.png)
+
+### إدارة المخازن
+![Warehouses](docs/screenshots/04-warehouses.png)
+
+### حركات المخزون
+![Inventory Transactions](docs/screenshots/05-inventory-transactions.png)
+
+### المرتجعات
+![Returns](docs/screenshots/06-returns.png)
+
+### سجل التدقيق
+![Audit Log](docs/screenshots/07-audit-log.png)
 ## التشغيل السريع عبر Docker (موصى به)
 
 ```bash

@@ -1,0 +1,811 @@
+// ============================================================================
+// Prisma Schema — نظام إدارة المبيعات والمخزون
+// مبني حرفيًا على "Database Design — النسخة المعتمدة النهائية" و ERD المعتمد.
+// لا جداول أو علاقات مخترعة هنا — كل كيان هنا موثّق في وثيقة التصميم المعتمدة.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// إشعار هام حول ميزات PostgreSQL غير المدعومة تلقائيًا في Prisma Schema:
+//   - Generated Columns (inventory_balances.available_quantity,
+//     sales_orders.remaining_balance) لا يمكن التصريح عنها هنا بصياغة Prisma
+//     القياسية. تُضاف عبر SQL يدوي داخل ملف Migration بعد `prisma migrate dev`
+//     (موثّق في prisma/migrations/..._add_generated_columns/migration.sql).
+//   - CHECK Constraints متعددة الأعمدة (مثال: approvals - عمود واحد فقط من
+//     sales_order_id/return_id غير NULL) تُضاف بنفس الطريقة.
+//   - Partial Unique Index (products.barcode WHERE barcode IS NOT NULL)
+//     يُضاف يدويًا أيضًا. هذا موثّق بالتفصيل في نهاية هذا الملف.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// أ. الهوية والصلاحيات
+// ----------------------------------------------------------------------------
+
+model User {
+  id                 String    @id @default(uuid())
+  fullName           String    @map("full_name")
+  username           String    @unique
+  email              String?   @unique
+  passwordHash       String    @map("password_hash")
+  phone              String?
+  isActive           Boolean   @default(true) @map("is_active")
+  defaultWarehouseId String?   @map("default_warehouse_id")
+  defaultWarehouse   Warehouse? @relation(fields: [defaultWarehouseId], references: [id])
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  userRoles          UserRole[]
+  auditLogs          AuditLog[]
+  notifications      Notification[]
+  notificationReads  NotificationRead[] // Step 6.1 — حالة قراءة كل إشعار خاصة بهذا المستخدم تحديدًا
+  refreshTokens      RefreshToken[]
+  createdSalesOrders SalesOrder[]      @relation("SalesOrderCreatedBy")
+  approvedSalesOrders SalesOrder[]     @relation("SalesOrderApprovedBy")
+  inventoryTransactions InventoryTransaction[]
+  createdPurchaseOrders PurchaseOrder[]
+  receivedReceipts   PurchaseReceipt[]
+  receivedPayments   Payment[]
+  createdReturns     Return[]
+  approvalsRequested Approval[]        @relation("ApprovalRequestedBy")
+  approvalsDecided   Approval[]        @relation("ApprovalDecidedBy")
+
+  @@map("users")
+}
+
+model Role {
+  id       String   @id @default(uuid())
+  code     String   @unique
+  nameAr   String   @map("name_ar")
+  isActive Boolean  @default(true) @map("is_active")
+
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+  notifications   Notification[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id            String   @id @default(uuid())
+  code          String   @unique
+  module        String
+  descriptionAr String?  @map("description_ar")
+
+  rolePermissions      RolePermission[]
+  requiredInTransitions OrderStatusTransition[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// ----------------------------------------------------------------------------
+// ب. الكتالوج
+// ----------------------------------------------------------------------------
+
+model Category {
+  id       String   @id @default(uuid())
+  nameAr   String   @map("name_ar")
+  isActive Boolean  @default(true) @map("is_active")
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Brand {
+  id       String   @id @default(uuid())
+  nameAr   String   @map("name_ar")
+  isActive Boolean  @default(true) @map("is_active")
+
+  products Product[]
+
+  @@map("brands")
+}
+
+model Unit {
+  id       String   @id @default(uuid())
+  nameAr   String   @map("name_ar")
+  symbol   String?
+  isActive Boolean  @default(true) @map("is_active")
+
+  products Product[]
+
+  @@map("units")
+}
+
+model Product {
+  id                    String   @id @default(uuid())
+  code                  String   @unique
+  nameAr                String   @map("name_ar")
+  categoryId            String   @map("category_id")
+  brandId               String?  @map("brand_id")
+  unitId                String   @map("unit_id")
+  barcode               String?  @unique
+  purchasePrice         Decimal  @default(0) @db.Decimal(12, 2) @map("purchase_price")
+  sellingPrice          Decimal  @default(0) @db.Decimal(12, 2) @map("selling_price")
+  averageCost           Decimal  @default(0) @db.Decimal(12, 4) @map("average_cost")
+  defaultMinimumStock   Int?     @map("default_minimum_stock") // قالب اختياري فقط، لا يُستخدم في أي تحقق فعلي
+  isActive              Boolean  @default(true) @map("is_active")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  category              Category @relation(fields: [categoryId], references: [id])
+  brand                 Brand?   @relation(fields: [brandId], references: [id])
+  unit                  Unit     @relation(fields: [unitId], references: [id])
+
+  supplierProducts       SupplierProduct[]
+  warehouseSettings      WarehouseProductSetting[]
+  inventoryBalances      InventoryBalance[]
+  inventoryReservations  InventoryReservation[]
+  inventoryTransactions  InventoryTransaction[]
+  salesOrderItems        SalesOrderItem[]
+  purchaseOrderItems     PurchaseOrderItem[]
+  purchaseReceiptItems   PurchaseReceiptItem[]
+  returnItems            ReturnItem[]
+
+  @@map("products")
+}
+
+model WarehouseProductSetting {
+  id             String   @id @default(uuid())
+  productId      String   @map("product_id")
+  warehouseId    String   @map("warehouse_id")
+  minimumStock   Int      @map("minimum_stock")
+  reorderLevel   Int?     @map("reorder_level")
+  isActive       Boolean  @default(true) @map("is_active")
+
+  product        Product   @relation(fields: [productId], references: [id])
+  warehouse      Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@unique([productId, warehouseId])
+  @@map("warehouse_product_settings")
+}
+
+model Supplier {
+  id       String  @id @default(uuid())
+  name     String
+  phone    String?
+  address  String?
+  isActive Boolean @default(true) @map("is_active")
+
+  supplierProducts SupplierProduct[]
+  purchaseOrders   PurchaseOrder[]
+  returns          Return[]
+
+  @@map("suppliers")
+}
+
+model SupplierProduct {
+  id                  String  @id @default(uuid())
+  supplierId          String  @map("supplier_id")
+  productId           String  @map("product_id")
+  supplierPrice       Decimal @db.Decimal(12, 2) @map("supplier_price")
+  supplierProductCode String? @map("supplier_product_code")
+  isPreferred         Boolean @default(false) @map("is_preferred")
+
+  supplier Supplier @relation(fields: [supplierId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@unique([supplierId, productId])
+  @@map("supplier_products")
+}
+
+// ----------------------------------------------------------------------------
+// ج. العملاء
+// ----------------------------------------------------------------------------
+
+enum CustomerType {
+  cash
+  credit
+}
+
+model Customer {
+  id               String       @id @default(uuid())
+  name             String
+  mobileNumber     String       @unique @map("mobile_number")
+  region           String?
+  contactPerson    String?      @map("contact_person")
+  taxNumber        String?      @map("tax_number")
+  customerType     CustomerType @map("customer_type")
+  creditLimit      Decimal      @default(0) @db.Decimal(14, 2) @map("credit_limit")
+  paymentTermsDays Int?         @map("payment_terms_days")
+  currentBalance   Decimal      @default(0) @db.Decimal(14, 2) @map("current_balance")
+  isActive         Boolean      @default(true) @map("is_active")
+
+  locations   CustomerLocation[]
+  salesOrders SalesOrder[]
+  payments    Payment[]
+  returns     Return[]
+
+  @@map("customers")
+}
+
+model CustomerLocation {
+  id         String  @id @default(uuid())
+  customerId String  @map("customer_id")
+  label      String?
+  address    String
+  isDefault  Boolean @default(false) @map("is_default")
+
+  customer    Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  salesOrders SalesOrder[]
+
+  @@map("customer_locations")
+}
+
+// ----------------------------------------------------------------------------
+// د. المخزون
+// ----------------------------------------------------------------------------
+
+model Warehouse {
+  id       String  @id @default(uuid())
+  name     String
+  code     String  @unique
+  address  String?
+  isActive Boolean @default(true) @map("is_active")
+
+  users                  User[]
+  productSettings        WarehouseProductSetting[]
+  inventoryBalances      InventoryBalance[]
+  inventoryReservations  InventoryReservation[]
+  inventoryTransactions  InventoryTransaction[]
+  salesOrders            SalesOrder[]
+  purchaseOrders         PurchaseOrder[]
+  purchaseReceipts       PurchaseReceipt[]
+  returns                Return[]
+
+  @@map("warehouses")
+}
+
+model InventoryBalance {
+  id                String   @id @default(uuid())
+  productId         String   @map("product_id")
+  warehouseId       String   @map("warehouse_id")
+  quantityOnHand    Decimal  @default(0) @db.Decimal(12, 2) @map("quantity_on_hand")
+  reservedQuantity  Decimal  @default(0) @db.Decimal(12, 2) @map("reserved_quantity")
+  // availableQuantity: عمود محسوب (GENERATED ALWAYS AS quantity_on_hand - reserved_quantity STORED)
+  // يُضاف عبر SQL يدوي في Migration — غير معرّف هنا كحقل Prisma عادي، انظر الملاحظة أعلى الملف.
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  product   Product   @relation(fields: [productId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@unique([productId, warehouseId])
+  @@map("inventory_balances")
+}
+
+enum ReservationStatus {
+  active
+  released
+  consumed
+}
+
+model InventoryReservation {
+  id                String            @id @default(uuid())
+  salesOrderItemId  String            @unique @map("sales_order_item_id")
+  productId         String            @map("product_id")
+  warehouseId       String            @map("warehouse_id")
+  quantityReserved  Decimal           @db.Decimal(12, 2) @map("quantity_reserved")
+  status            ReservationStatus @default(active)
+  createdAt         DateTime          @default(now()) @map("created_at")
+  resolvedAt        DateTime?         @map("resolved_at")
+
+  salesOrderItem SalesOrderItem @relation(fields: [salesOrderItemId], references: [id])
+  product        Product        @relation(fields: [productId], references: [id])
+  warehouse      Warehouse      @relation(fields: [warehouseId], references: [id])
+
+  @@map("inventory_reservations")
+}
+
+enum InventoryTransactionType {
+  purchase_receipt
+  sale
+  customer_return
+  supplier_return
+  adjustment
+}
+
+enum InventoryReferenceType {
+  sales_order
+  purchase_receipt
+  return
+  manual
+}
+
+model InventoryTransaction {
+  id              String                    @id @default(uuid())
+  productId       String                    @map("product_id")
+  warehouseId     String                    @map("warehouse_id")
+  transactionType InventoryTransactionType  @map("transaction_type")
+  quantity        Decimal                   @db.Decimal(12, 2) // موجب للداخل، سالب للخارج
+  unitCost        Decimal?                  @db.Decimal(12, 4) @map("unit_cost")
+  referenceType   InventoryReferenceType    @map("reference_type")
+  referenceId     String?                   @map("reference_id") // Polymorphic — بلا FK حقيقي (قرار معتمد)
+  userId          String                    @map("user_id")
+  notes           String?                   // إلزامي في adjustment (يُفرض في Service Layer)
+  transactionDate DateTime                  @default(now()) @map("transaction_date")
+
+  product   Product   @relation(fields: [productId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([productId, warehouseId, transactionDate])
+  @@index([transactionType])
+  @@index([referenceType, referenceId])
+  @@map("inventory_transactions")
+}
+
+// ----------------------------------------------------------------------------
+// هـ. المبيعات
+// ----------------------------------------------------------------------------
+
+enum SalesOrderStatus {
+  draft
+  pending_approval
+  approved
+  preparing
+  ready_for_delivery
+  delivered
+  cancelled
+  rejected // مُضافة بقرار معتمد — الفصل بين رفض الحوكمة وإلغاء المستخدم
+}
+
+enum PaymentType {
+  cash
+  credit
+}
+
+model SalesOrder {
+  id                  String           @id @default(uuid())
+  orderNumber         String           @unique @map("order_number")
+  customerId          String           @map("customer_id")
+  customerLocationId  String?          @map("customer_location_id")
+  warehouseId         String           @map("warehouse_id")
+  status              SalesOrderStatus @default(draft)
+  paymentType         PaymentType      @map("payment_type")
+  subtotal            Decimal          @default(0) @db.Decimal(14, 2)
+  discountPercent     Decimal          @default(0) @db.Decimal(5, 2) @map("discount_percent")
+  discountAmount      Decimal          @default(0) @db.Decimal(14, 2) @map("discount_amount")
+  totalAmount         Decimal          @default(0) @db.Decimal(14, 2) @map("total_amount")
+  paidAmount          Decimal          @default(0) @db.Decimal(14, 2) @map("paid_amount")
+  // remainingBalance: عمود محسوب (GENERATED ALWAYS AS total_amount - paid_amount STORED)
+  // يُضاف عبر SQL يدوي في Migration.
+  requiresApproval    Boolean          @default(false) @map("requires_approval")
+  createdBy           String           @map("created_by")
+  approvedBy          String?          @map("approved_by")
+  orderDate           DateTime         @default(now()) @map("order_date")
+  deliveredAt         DateTime?        @map("delivered_at")
+  cancelledReason     String?          @map("cancelled_reason")
+
+  customer         Customer          @relation(fields: [customerId], references: [id])
+  customerLocation CustomerLocation? @relation(fields: [customerLocationId], references: [id])
+  warehouse        Warehouse         @relation(fields: [warehouseId], references: [id])
+  creator          User              @relation("SalesOrderCreatedBy", fields: [createdBy], references: [id])
+  approver         User?             @relation("SalesOrderApprovedBy", fields: [approvedBy], references: [id])
+
+  items      SalesOrderItem[]
+  payments   Payment[]
+  approvals  Approval[]
+  returns    Return[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([orderDate])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id                String  @id @default(uuid())
+  salesOrderId      String  @map("sales_order_id")
+  productId         String  @map("product_id")
+  quantity          Decimal @db.Decimal(12, 2)
+  unitPrice         Decimal @db.Decimal(12, 2) @map("unit_price")
+  discountPercent   Decimal @default(0) @db.Decimal(5, 2) @map("discount_percent")
+  unitCostSnapshot  Decimal @db.Decimal(12, 4) @map("unit_cost_snapshot")
+  lineTotal         Decimal @db.Decimal(14, 2) @map("line_total")
+
+  salesOrder  SalesOrder             @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  product     Product                @relation(fields: [productId], references: [id])
+  reservation InventoryReservation?
+
+  @@index([salesOrderId])
+  @@index([productId])
+  @@map("sales_order_items")
+}
+
+model OrderStatusTransition {
+  id                   String           @id @default(uuid())
+  fromStatus           SalesOrderStatus @map("from_status")
+  toStatus             SalesOrderStatus @map("to_status")
+  requiredPermissionId String           @map("required_permission_id")
+  isActive             Boolean          @default(true) @map("is_active")
+
+  requiredPermission Permission @relation(fields: [requiredPermissionId], references: [id])
+
+  @@unique([fromStatus, toStatus])
+  @@map("order_status_transitions")
+}
+
+model PaymentMethod {
+  id       String  @id @default(uuid())
+  code     String  @unique
+  nameAr   String  @map("name_ar")
+  isActive Boolean @default(true) @map("is_active")
+
+  payments Payment[]
+
+  @@map("payment_methods")
+}
+
+enum PaymentStatus {
+  completed
+  voided
+}
+
+model Payment {
+  id              String        @id @default(uuid())
+  salesOrderId    String        @map("sales_order_id")
+  customerId      String        @map("customer_id")
+  paymentMethodId String        @map("payment_method_id")
+  amount          Decimal       @db.Decimal(14, 2)
+  status          PaymentStatus @default(completed)
+  paymentDate     DateTime      @default(now()) @map("payment_date")
+  receivedBy      String        @map("received_by")
+  referenceNumber String?       @map("reference_number")
+  voidedReason    String?       @map("voided_reason")
+
+  salesOrder    SalesOrder    @relation(fields: [salesOrderId], references: [id])
+  customer      Customer      @relation(fields: [customerId], references: [id])
+  paymentMethod PaymentMethod @relation(fields: [paymentMethodId], references: [id])
+  receiver      User          @relation(fields: [receivedBy], references: [id])
+
+  @@index([salesOrderId])
+  @@index([customerId])
+  @@index([paymentDate])
+  @@index([status])
+  @@map("payments")
+}
+
+// ----------------------------------------------------------------------------
+// و. المشتريات
+// ----------------------------------------------------------------------------
+
+enum PurchaseOrderStatus {
+  draft
+  pending
+  partially_received
+  completed
+  cancelled
+}
+
+model PurchaseOrder {
+  id                    String              @id @default(uuid())
+  poNumber              String              @unique @map("po_number")
+  supplierId            String              @map("supplier_id")
+  warehouseId           String              @map("warehouse_id")
+  status                PurchaseOrderStatus @default(draft)
+  expectedDeliveryDate  DateTime?           @map("expected_delivery_date")
+  notes                 String?             // إضافة Step 3 — حقل اختياري بحت، لا يمس أي بيانات قائمة
+  createdBy             String              @map("created_by")
+  orderDate             DateTime            @default(now()) @map("order_date")
+  updatedAt             DateTime            @updatedAt @map("updated_at") // إضافة Step 3
+
+  supplier  Supplier  @relation(fields: [supplierId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  creator   User      @relation(fields: [createdBy], references: [id])
+
+  items    PurchaseOrderItem[]
+  receipts PurchaseReceipt[]
+  returns  Return[]
+
+  @@index([supplierId])
+  @@index([status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id                String  @id @default(uuid())
+  purchaseOrderId   String  @map("purchase_order_id")
+  productId         String  @map("product_id")
+  quantityOrdered   Decimal @db.Decimal(12, 2) @map("quantity_ordered")
+  quantityReceived  Decimal @default(0) @db.Decimal(12, 2) @map("quantity_received")
+  unitPrice         Decimal @db.Decimal(12, 2) @map("unit_price")
+  lineTotal         Decimal @default(0) @db.Decimal(14, 2) @map("line_total") // إضافة Step 3 — quantityOrdered × unitPrice، تُحسَب في Service Layer
+
+  purchaseOrder  PurchaseOrder          @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product        Product                @relation(fields: [productId], references: [id])
+  receiptItems   PurchaseReceiptItem[]
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@map("purchase_order_items")
+}
+
+model PurchaseReceipt {
+  id                String   @id @default(uuid())
+  receiptNumber     String   @unique @map("receipt_number")
+  purchaseOrderId   String   @map("purchase_order_id")
+  warehouseId       String   @map("warehouse_id")
+  receivedBy        String   @map("received_by")
+  receiptDate       DateTime @default(now()) @map("receipt_date")
+  isPartial         Boolean  @default(false) @map("is_partial")
+  notes             String?  // إضافة Step 3 — حقل اختياري بحت
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  warehouse     Warehouse     @relation(fields: [warehouseId], references: [id])
+  receiver      User          @relation(fields: [receivedBy], references: [id])
+
+  items PurchaseReceiptItem[]
+
+  @@map("purchase_receipts")
+}
+
+model PurchaseReceiptItem {
+  id                    String  @id @default(uuid())
+  purchaseReceiptId     String  @map("purchase_receipt_id")
+  purchaseOrderItemId   String  @map("purchase_order_item_id")
+  productId             String  @map("product_id")
+  quantityReceived      Decimal @db.Decimal(12, 2) @map("quantity_received")
+  unitCost              Decimal @db.Decimal(12, 4) @map("unit_cost")
+
+  purchaseReceipt   PurchaseReceipt   @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  product           Product           @relation(fields: [productId], references: [id])
+
+  @@index([purchaseReceiptId])
+  @@index([purchaseOrderItemId])
+  @@map("purchase_receipt_items")
+}
+
+// ----------------------------------------------------------------------------
+// ز. المرتجعات
+// ----------------------------------------------------------------------------
+
+enum ReturnType {
+  customer_return
+  supplier_return
+}
+
+enum ReturnStatus {
+  draft
+  pending_approval
+  approved
+  completed
+  cancelled
+}
+
+model Return {
+  id                        String       @id @default(uuid())
+  returnNumber               String       @unique @map("return_number")
+  returnType                 ReturnType   @map("return_type")
+  customerId                 String?      @map("customer_id")
+  supplierId                 String?      @map("supplier_id")
+  referenceSalesOrderId      String?      @map("reference_sales_order_id")
+  referencePurchaseOrderId   String?      @map("reference_purchase_order_id")
+  warehouseId                String       @map("warehouse_id")
+  status                      ReturnStatus @default(draft)
+  createdBy                   String       @map("created_by")
+  returnDate                  DateTime     @default(now()) @map("return_date")
+
+  customer               Customer?      @relation(fields: [customerId], references: [id])
+  supplier               Supplier?      @relation(fields: [supplierId], references: [id])
+  referenceSalesOrder    SalesOrder?    @relation(fields: [referenceSalesOrderId], references: [id])
+  referencePurchaseOrder PurchaseOrder? @relation(fields: [referencePurchaseOrderId], references: [id])
+  warehouse               Warehouse      @relation(fields: [warehouseId], references: [id])
+  creator                 User           @relation(fields: [createdBy], references: [id])
+
+  items     ReturnItem[]
+  approvals Approval[]
+
+  @@map("returns")
+}
+
+model ReturnItem {
+  id        String  @id @default(uuid())
+  returnId  String  @map("return_id")
+  productId String  @map("product_id")
+  quantity  Decimal @db.Decimal(12, 2)
+  unitPrice Decimal @db.Decimal(12, 2) @map("unit_price")
+  reason    String?
+
+  return  Return  @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@map("return_items")
+}
+
+// ----------------------------------------------------------------------------
+// ح. الحوكمة
+// ----------------------------------------------------------------------------
+
+enum ApprovalType {
+  discount_exceeded
+  credit_limit_exceeded
+  return_approval // إضافة Step 5 — العلاقة Approval.returnId كانت موجودة أصلًا في التصميم المعتمد، لكن لا قيمة enum تصفها؛ هذه أول استخدام فعلي لها
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+}
+
+model Approval {
+  id            String         @id @default(uuid())
+  approvalType  ApprovalType   @map("approval_type")
+  salesOrderId  String?        @map("sales_order_id")
+  returnId      String?        @map("return_id")
+  requestedBy   String         @map("requested_by")
+  approverId    String?        @map("approver_id")
+  status        ApprovalStatus @default(pending)
+  reason        String?        // إلزامي عند status=rejected (يُفرض في Service Layer + CHECK يدوي)
+  requestedAt   DateTime       @default(now()) @map("requested_at")
+  decidedAt     DateTime?      @map("decided_at")
+
+  salesOrder SalesOrder? @relation(fields: [salesOrderId], references: [id])
+  return     Return?     @relation(fields: [returnId], references: [id])
+  requester  User        @relation("ApprovalRequestedBy", fields: [requestedBy], references: [id])
+  approver   User?       @relation("ApprovalDecidedBy", fields: [approverId], references: [id])
+
+  @@index([status])
+  @@index([salesOrderId])
+  @@index([returnId])
+  @@map("approvals")
+}
+
+enum NotificationType {
+  low_stock
+  approval_needed
+  credit_limit_exceeded
+  po_delayed
+  order_rejected
+  approval_decided // إضافة Step 5 — إشعار عام لمقدّم الطلب بنتيجة أي موافقة (مقبولة/مرفوضة)
+}
+// ملاحظة تصميمية مهمة (إصلاح Step 6.1 — يستحق مراجعتكم):
+// `isRead` أدناه **لم يعد يمثّل حالة قراءة أي مستخدم بعينه**. كان هذا هو
+// الخطأ الأصلي: إشعار موجَّه لدور كامل (SALES/WAREHOUSE/PURCHASING) له
+// حقل isRead واحد مشترك، فقراءة أي عضو واحد في الدور كانت تُخفي الإشعار
+// عن بقية أعضاء الدور خطأً.
+// 
+// الإصلاح: أُضيف نموذج `NotificationRead` أدناه — سجل مستقل لكل (إشعار ×
+// مستخدم) يُنشَأ فقط عندما يقرأ ذلك المستخدم تحديدًا هذا الإشعار. **هذا
+// هو مصدر الحقيقة الوحيد لتحديد "مقروء/غير مقروء" لأي مستخدم معيّن** —
+// راجعوا NotificationsService لمنطق القراءة الفعلي.
+// 
+// `isRead` هنا أُبقي عليه (لم يُحذَف — إضافي وليس استبداليًا) لغرض مختلف
+// تمامًا وما زال صحيحًا: بوابة منع تكرار التنبيهات التشغيلية (Low Stock/
+// Credit Limit/PO Delayed) — "هل أقرّ أي مستخدم مؤهَّل هذا التنبيه بالفعل؟"
+// لتفادي إغراق المستخدمين بتنبيهات مكررة لنفس المشكلة القائمة. عند قراءة
+// أي مستخدم مؤهَّل للإشعار، يُحدَّث كلا الأمرين معًا: يُنشأ NotificationRead
+// خاص به (يؤثر فقط على ما يراه هو)، ويُحدَّث isRead المشترك إلى true
+// (يؤثر فقط على بوابة إعادة الإصدار المستقبلية لتنبيه جديد لنفس المورد،
+// وليس على ما يراه أي مستخدم آخر في قائمته الشخصية — تلك تُقرَّر حصريًا
+// عبر NotificationRead).
+// 
+model Notification {
+  id            String            @id @default(uuid())
+  userId        String?           @map("user_id")
+  roleId        String?           @map("role_id")
+  type          NotificationType
+  titleAr       String            @map("title_ar")
+  messageAr     String            @map("message_ar")
+  referenceType String?           @map("reference_type")
+  referenceId   String?           @map("reference_id")
+  isRead        Boolean           @default(false) @map("is_read") // بوابة منع التكرار العامة فقط — راجعوا التوثيق أعلاه
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  user  User?              @relation(fields: [userId], references: [id])
+  role  Role?              @relation(fields: [roleId], references: [id])
+  reads NotificationRead[]
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+// NotificationRead — Step 6.1. حالة قراءة مستقلة لكل (إشعار × مستخدم).
+// وجود صف = "هذا المستخدم قرأ هذا الإشعار تحديدًا". غياب الصف = غير مقروء
+// له. لا يوجد حقل isRead هنا أصلًا — الوجود نفسه هو الحالة (Presence-as-state)،
+// فلا حاجة لتعليم صف كـ"غير مقروء" لاحقًا (يُحذَف الصف بدل ذلك إن احتجتم
+// ميزة "تعليم كغير مقروء" مستقبلًا — غير مطلوبة حاليًا).
+// 
+model NotificationRead {
+  id             String   @id @default(uuid())
+  notificationId String   @map("notification_id")
+  userId         String   @map("user_id")
+  readAt         DateTime @default(now()) @map("read_at")
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, userId])
+  @@index([userId])
+  @@map("notification_reads")
+}
+
+enum AuditAction {
+  create
+  update
+  deactivate
+  approve
+  reject
+  status_change
+  export // إضافة Step 7 — أول حاجة فعلية لتسجيل "تصدير تقرير"؛ لا قيمة enum حالية تصف هذا الإجراء بدقة
+}
+
+model AuditLog {
+  id        String      @id @default(uuid())
+  userId    String      @map("user_id")
+  action    AuditAction
+  entity    String
+  entityId  String      @map("entity_id")
+  oldValue  Json?       @map("old_value")
+  newValue  Json?       @map("new_value")
+  timestamp DateTime    @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------------------------------
+// ط. أمان الجلسات — Refresh Token Rotation/Revocation
+// ----------------------------------------------------------------------------
+// هذا جدول بنية تحتية للمصادقة (وليس كيان عمل من ERD المعتمد) — لا يغيّر
+// Business Domain Schema المعتمد. أُضيف استجابة لمتطلب Security Hardening:
+// كل Refresh Token يُخزَّن كـ Hash فقط (لا نص خام أبدًا)، ويُستبدَل (Rotation)
+// عند كل استخدام ناجح؛ إعادة استخدام Token مُستبدَل/مُلغى تُعامَل كمؤشر سرقة
+// محتمل وتُبطِل كل جلسات المستخدم فورًا (انظر AuthService.rotateRefreshToken).
+model RefreshToken {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  tokenHash         String    @unique @map("token_hash") // SHA-256 للتوكن الخام — لا يُخزَّن التوكن نفسه أبدًا
+  revoked           Boolean   @default(false)
+  expiresAt         DateTime  @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  replacedByTokenId String?   @map("replaced_by_token_id") // لتتبع سلسلة الاستبدال (Rotation Chain)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ============================================================================
+// ملاحظة: ميزات PostgreSQL التالية غير مدعومة تصريحيًا في Prisma Schema
+// Language (Generated Columns، CHECK متعددة الأعمدة، Partial Unique Index).
+// لا تحتاج أي خطوة يدوية خارج المشروع — كُتبت مباشرة داخل ملف Migration
+// الفعلي نفسه: apps/api/prisma/migrations/20250101000000_init/migration.sql
+// بحيث يكفي تشغيل `npx prisma migrate deploy` وحده لبناء قاعدة البيانات
+// كاملة من الصفر دون أي SQL خارجي إضافي.
+// ============================================================================

@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  direction: rtl;
+  font-family: 'IBM Plex Sans Arabic', 'Tajawal', sans-serif;
+}
+
+@layer components {
+  .input {
+    @apply w-full border border-gray-300 rounded-lg px-3 py-2 text-sm;
+  }
+}

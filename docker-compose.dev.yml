@@ -1,0 +1,57 @@
+version: '3.9'
+
+# بيئة Development — Hot Reload لكل من API وWeb، بيانات Postgres/Redis محلية غير دائمة بالضرورة.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sales_inventory_db
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.dev
+    env_file: ./apps/api/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/sales_inventory_db?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./apps/api:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.dev
+    env_file: ./apps/web/.env
+    ports:
+      - '5173:5173'
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  postgres_dev_data:

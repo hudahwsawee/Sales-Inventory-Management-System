@@ -1,0 +1,19 @@
+FROM node:20-bookworm-slim
+
+# Prisma Query Engine يحتاج OpenSSL متاحًا في نظام التشغيل وقت التشغيل.
+# node:20-alpine (musl + Alpine 3.18+ الذي يشحن OpenSSL 3.0 فقط) كان يسبب
+# فشل تحميل libssl.so.1.1 لأن محرك Prisma الافتراضي مبني على OpenSSL 1.1.
+# الحل: node:20-bookworm-slim (Debian، glibc) — التوافق الأكثر استقرارًا
+# مع Prisma حسب توثيقهم الرسمي — مع تثبيت openssl صراحة لأن الصورة
+# "slim" لا تتضمنه افتراضيًا.
+RUN apt-get update -y \
+    && apt-get install -y openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npx prisma generate
+EXPOSE 3000
+CMD ["npm", "run", "start:dev"]

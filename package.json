@@ -1,0 +1,15 @@
+{
+  "name": "sales-inventory-system",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "prisma:generate": "npm run prisma:generate --workspace=apps/api",
+    "prisma:migrate": "npm run prisma:migrate:dev --workspace=apps/api",
+    "prisma:seed": "npm run prisma:seed --workspace=apps/api"
+  }
+}
